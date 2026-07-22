@@ -21,8 +21,11 @@ const FACE_FLAVOR: Record<FaceKey, string[]> = {
 };
 
 const GENERATE_GENERIC = [
+  'Wrapping the room around you…',
+  'Painting all four walls at once…',
+  'Bending light around the corners…',
+  'Stitching a seamless 360° view…',
   'Matching the lighting so nobody notices…',
-  'Blending seams like a pro decorator…',
   'Double-checking the vibes…',
 ];
 

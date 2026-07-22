@@ -2,19 +2,8 @@ import { useRef, useState } from 'react';
 import { PhotoUploader } from './components/PhotoUploader';
 import { ReasoningProgress } from './components/ReasoningProgress';
 import { WalkthroughViewer } from './components/WalkthroughViewer';
-import { RoomFaces, FaceKey, UploadedPhoto, AnalysisResult, Phase, BuildProgress, RoomDimensions } from './types';
+import { UploadedPhoto, AnalysisResult, Phase, BuildProgress } from './types';
 import { Cuboid, RotateCcw, X } from 'lucide-react';
-
-const FACE_KEYS: FaceKey[] = ['front', 'back', 'left', 'right', 'top', 'bottom'];
-
-const EMPTY_FACES: RoomFaces = {
-  front: null,
-  back: null,
-  left: null,
-  right: null,
-  top: null,
-  bottom: null,
-};
 
 async function dataURLtoBlob(dataUrl: string): Promise<Blob> {
   const res = await fetch(dataUrl);
@@ -38,10 +27,9 @@ async function postForm<T>(url: string, form: FormData): Promise<T> {
 export default function App() {
   const [phase, setPhase] = useState<Phase>('upload');
   const [photos, setPhotos] = useState<UploadedPhoto[]>([]);
-  const [faces, setFaces] = useState<RoomFaces>(EMPTY_FACES);
+  const [pano, setPano] = useState<string | null>(null);
   const [progress, setProgress] = useState<BuildProgress | null>(null);
   const [reasoning, setReasoning] = useState<string | null>(null);
-  const [dimensions, setDimensions] = useState<RoomDimensions | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Guards against state updates from a build that was reset mid-flight.
   const buildToken = useRef(0);
@@ -49,10 +37,9 @@ export default function App() {
   const resetToUpload = () => {
     buildToken.current += 1;
     setPhase('upload');
-    setFaces(EMPTY_FACES);
+    setPano(null);
     setProgress(null);
     setReasoning(null);
-    setDimensions(null);
     setError(null);
   };
 
@@ -63,13 +50,13 @@ export default function App() {
 
     setError(null);
     setReasoning(null);
-    setFaces(EMPTY_FACES);
+    setPano(null);
     setPhase('reasoning');
     setProgress({ stage: 'analyzing', current: 0, total: 0, face: null });
 
     try {
-      // Step 2a — LLM reasoning: which photo is which surface, and what does
-      // the room look like as a whole?
+      // Step 2a — LLM reasoning over the photos: layout, proportions, and a
+      // dense per-surface description of the room.
       const analyzeForm = new FormData();
       for (const [i, photo] of photos.entries()) {
         analyzeForm.append('photos', await dataURLtoBlob(photo.dataUrl), `photo${i}.jpg`);
@@ -77,76 +64,27 @@ export default function App() {
       const analysis = await postForm<AnalysisResult>('/api/analyze', analyzeForm);
       if (!live()) return;
       setReasoning(analysis.reasoning || null);
-      setDimensions(analysis.dimensions ?? null);
 
-      // Only straight-on single-surface "wall" photos may become a face
-      // texture. Overviews and close-ups are reference imagery — they inform
-      // generation but never land on a face (that's what put kitchens on
-      // floors and vents on ceilings).
-      const assigned: RoomFaces = { ...EMPTY_FACES };
-      const assignedIndices = new Set<number>();
-      for (const p of analysis.photos ?? []) {
-        const photo = photos[p.photoIndex];
-        if (
-          photo &&
-          p.role === 'wall' &&
-          p.face !== 'none' &&
-          FACE_KEYS.includes(p.face) &&
-          !assigned[p.face]
-        ) {
-          assigned[p.face] = photo.dataUrl;
-          assignedIndices.add(p.photoIndex);
-        }
-      }
-      setFaces(assigned);
-
-      const referencePhotos = photos.filter((_, i) => !assignedIndices.has(i));
       const description =
         (analysis.roomDescription ?? '') +
         (analysis.dimensions
           ? ` Room proportions — width ${analysis.dimensions.width}, depth ${analysis.dimensions.depth}, height ${analysis.dimensions.height}.`
           : '');
 
-      // Step 2b — generate every face we don't have a clean wall photo for,
-      // feeding assigned photos, unassigned reference photos AND previously
-      // generated faces back in so the room stays coherent.
-      const missing = FACE_KEYS.filter((k) => !assigned[k]);
-      const current: RoomFaces = { ...assigned };
-      const failures: string[] = [];
-      let lastFailureMessage: string | null = null;
-
-      for (const [i, face] of missing.entries()) {
-        if (!live()) return;
-        setProgress({ stage: 'generating', current: i + 1, total: missing.length, face });
-        try {
-          const genForm = new FormData();
-          for (const key of FACE_KEYS) {
-            const dataUrl = current[key];
-            if (dataUrl) {
-              genForm.append(key, await dataURLtoBlob(dataUrl), `${key}.jpg`);
-            }
-          }
-          for (const [j, ref] of referencePhotos.entries()) {
-            genForm.append('references', await dataURLtoBlob(ref.dataUrl), `reference${j}.jpg`);
-          }
-          genForm.append('face', face);
-          genForm.append('roomDescription', description);
-          const result = await postForm<{ face: FaceKey; image: string }>('/api/generate-face', genForm);
-          if (!live()) return;
-          current[face] = result.image;
-          setFaces({ ...current });
-        } catch (err) {
-          failures.push(face);
-          lastFailureMessage = err instanceof Error ? err.message : String(err);
-        }
+      // Step 2b — ONE seamless 360° equirectangular panorama generated from
+      // every photo at once. A single globally-consistent image avoids the
+      // seams, duplicated furniture and misplaced surfaces that per-face
+      // generation produced.
+      setProgress({ stage: 'generating', current: 1, total: 1, face: null });
+      const genForm = new FormData();
+      for (const [i, photo] of photos.entries()) {
+        genForm.append('photos', await dataURLtoBlob(photo.dataUrl), `photo${i}.jpg`);
       }
-
+      genForm.append('roomDescription', description);
+      const result = await postForm<{ image: string }>('/api/generate-pano', genForm);
       if (!live()) return;
-      if (failures.length > 0) {
-        setError(
-          `Could not generate ${failures.length} surface${failures.length > 1 ? 's' : ''} (${failures.join(', ')}): ${lastFailureMessage}`,
-        );
-      }
+
+      setPano(result.image);
       setPhase('view');
     } catch (err) {
       if (!live()) return;
@@ -193,13 +131,13 @@ export default function App() {
         )}
 
         {phase === 'reasoning' && progress && (
-          <ReasoningProgress progress={progress} faces={faces} reasoning={reasoning} />
+          <ReasoningProgress progress={progress} photos={photos} reasoning={reasoning} />
         )}
 
         {phase === 'view' && (
           <div className="w-full max-w-6xl mx-auto flex-1 min-h-0 self-center flex flex-col gap-3">
             <div className="flex-1 min-h-0 relative">
-              <WalkthroughViewer faces={faces} dimensions={dimensions ?? undefined} />
+              <WalkthroughViewer pano={pano} />
             </div>
             {reasoning && (
               <p className="text-gray-500 text-xs font-mono shrink-0 max-w-3xl mx-auto text-center">

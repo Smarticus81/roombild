@@ -12,6 +12,7 @@ import {
   createClient,
   analyzeRoom,
   generateFace,
+  generatePanorama,
   describeApiError,
 } from './lib/gemini.mjs';
 import {
@@ -19,6 +20,7 @@ import {
   DEFAULT_OPENAI_IMAGE_MODEL,
   analyzeRoomOpenAI,
   generateFaceOpenAI,
+  generatePanoramaOpenAI,
 } from './lib/openai.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -99,6 +101,63 @@ app.post('/api/analyze', upload.array('photos', FACE_KEYS.length), async (req, r
     res.json({ success: true, provider, ...analysis });
   } catch (err) {
     console.error('analyze error:', err);
+    const { status, message } = describeApiError(err);
+    res.status(status).json({ success: false, error: message });
+  }
+});
+
+/**
+ * Panorama generation — produces ONE seamless 360° equirectangular image of
+ * the room from all uploaded photos. This is the primary rendering path; a
+ * single globally-consistent generation avoids the seams, duplication and
+ * misplacement that per-face generation suffered from.
+ * Accepts multipart `photos` (repeated) + `roomDescription`.
+ * Returns `{ success, image, provider }`.
+ */
+app.post('/api/generate-pano', upload.array('photos', FACE_KEYS.length * 2), async (req, res) => {
+  try {
+    const files = req.files ?? [];
+    if (files.length === 0) {
+      return res.status(400).json({ success: false, error: 'Upload at least one room photo.' });
+    }
+    const roomDescription = String(req.body?.roomDescription ?? '').slice(0, 6000);
+
+    const referenceParts = files.flatMap((file, i) => [
+      { text: `Reference photo ${i} of the room:` },
+      toInlinePart(file),
+    ]);
+
+    let image = null;
+    let provider = 'gemini';
+    let geminiError = null;
+    try {
+      image = await generatePanorama(ai, IMAGE_MODEL, referenceParts, roomDescription);
+    } catch (err) {
+      geminiError = err;
+    }
+
+    if (!image && OPENAI_API_KEY) {
+      if (geminiError) {
+        console.warn(`Gemini panorama failed (${geminiError.status ?? 'no image'}), falling back to OpenAI`);
+      }
+      image = await generatePanoramaOpenAI(
+        OPENAI_API_KEY,
+        OPENAI_IMAGE_MODEL,
+        files.map((f) => ({ mimeType: f.mimetype, base64: f.buffer.toString('base64') })),
+        roomDescription,
+        { quality: OPENAI_IMAGE_QUALITY },
+      );
+      provider = 'openai';
+    } else if (!image && geminiError) {
+      throw geminiError;
+    }
+
+    if (!image) {
+      return res.status(502).json({ success: false, error: 'The image model did not return a panorama. Please try again.' });
+    }
+    res.json({ success: true, image, provider });
+  } catch (err) {
+    console.error('generate-pano error:', err);
     const { status, message } = describeApiError(err);
     res.status(status).json({ success: false, error: message });
   }

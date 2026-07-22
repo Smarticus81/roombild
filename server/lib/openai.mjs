@@ -1,8 +1,8 @@
-import { FACE_KEYS, FACE_LABELS, ANALYZE_PROMPT, buildFacePrompt } from './gemini.mjs';
+import { FACE_KEYS, FACE_LABELS, ANALYZE_PROMPT, buildFacePrompt, buildPanoPrompt } from './gemini.mjs';
 
-export const DEFAULT_OPENAI_MODEL = 'gpt-5.1';
-export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-1.5';
-const FALLBACK_OPENAI_IMAGE_MODEL = 'gpt-image-1';
+export const DEFAULT_OPENAI_MODEL = 'gpt-5.6';
+export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-2';
+const FALLBACK_OPENAI_IMAGE_MODEL = 'gpt-image-1.5';
 
 const RESPONSE_SCHEMA = {
   type: 'object',
@@ -85,6 +85,71 @@ export async function analyzeRoomOpenAI(apiKey, model, photos, { effort = 'low' 
     throw new Error('OpenAI returned no text output for the analysis request.');
   }
   return JSON.parse(text);
+}
+
+async function imagesEditRequest(apiKey, model, prompt, photos, { quality, size }) {
+  const form = new FormData();
+  form.append('model', model);
+  form.append('prompt', prompt.slice(0, 30000));
+  form.append('size', size);
+  form.append('quality', quality);
+  form.append('input_fidelity', 'high');
+  for (const [i, photo] of photos.entries()) {
+    form.append(
+      'image[]',
+      new Blob([Buffer.from(photo.base64, 'base64')], { type: photo.mimeType }),
+      `photo${i}.jpg`,
+    );
+  }
+  const res = await fetch('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const err = new Error(`OpenAI image API error ${res.status}: ${body.slice(0, 300)}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  const data = await res.json();
+  const b64 = data?.data?.[0]?.b64_json;
+  return b64 ? `data:image/png;base64,${b64}` : null;
+}
+
+const isModelProblem = (err) =>
+  (err?.status === 400 || err?.status === 404) && /model/i.test(err?.body ?? '');
+const isSizeProblem = (err) => err?.status === 400 && /size/i.test(err?.body ?? '');
+
+/**
+ * Single seamless 360° equirectangular panorama via OpenAI's Images Edits
+ * API. Tries a 2:1 equirect size first, dropping to 1536x1024 if the model
+ * rejects it, and downgrades the model once if the configured one is
+ * unavailable. Returns a data URL or null.
+ */
+export async function generatePanoramaOpenAI(apiKey, model, photos, roomDescription = '', { quality = 'medium', size = '2048x1024' } = {}) {
+  const prompt = buildPanoPrompt(roomDescription);
+  const attempt = async (m, s) => {
+    try {
+      return await imagesEditRequest(apiKey, m, prompt, photos, { quality, size: s });
+    } catch (err) {
+      if (isSizeProblem(err) && s !== '1536x1024') {
+        console.warn(`OpenAI rejected size ${s}, retrying at 1536x1024`);
+        return imagesEditRequest(apiKey, m, prompt, photos, { quality, size: '1536x1024' });
+      }
+      throw err;
+    }
+  };
+  try {
+    return await attempt(model, size);
+  } catch (err) {
+    if (model !== FALLBACK_OPENAI_IMAGE_MODEL && isModelProblem(err)) {
+      console.warn(`OpenAI model "${model}" unavailable, retrying with ${FALLBACK_OPENAI_IMAGE_MODEL}`);
+      return attempt(FALLBACK_OPENAI_IMAGE_MODEL, size);
+    }
+    throw err;
+  }
 }
 
 /**

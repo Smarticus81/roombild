@@ -119,6 +119,40 @@ export function buildFacePrompt(face, roomDescription = '') {
   );
 }
 
+/** Prompt for the single seamless 360° equirectangular room panorama. */
+export function buildPanoPrompt(roomDescription = '') {
+  return (
+    `Using the attached reference photos of a real room, generate ONE seamless 360-degree equirectangular panorama ` +
+    `of that exact room, as seen from eye level at the very center of the room. ` +
+    (roomDescription ? `Analysis of the room: ${roomDescription}\n\n` : '') +
+    `Requirements: full 360° horizontal wrap — the left and right edges of the image must line up perfectly when wrapped around a sphere; ` +
+    `the ceiling stretches across the top of the image and the floor across the bottom; ` +
+    `reproduce the room's ACTUAL layout, furniture, materials, colors and lighting exactly as shown in the reference photos; ` +
+    `every piece of furniture and every feature appears exactly once, in its true position; ` +
+    `walls flow continuously into each other with correct perspective. ` +
+    `Photorealistic. No text, borders, people or watermarks.`
+  );
+}
+
+/**
+ * Generates the full 360° panorama as a data URL via Gemini, or null if the
+ * model returned no image.
+ */
+export async function generatePanorama(ai, model, referenceParts, roomDescription = '') {
+  const response = await ai.models.generateContent({
+    model,
+    contents: [{ role: 'user', parts: [...referenceParts, { text: buildPanoPrompt(roomDescription) }] }],
+  });
+  const parts = response?.candidates?.[0]?.content?.parts ?? [];
+  for (const part of parts) {
+    if (part.inlineData?.data) {
+      const mime = part.inlineData.mimeType || 'image/png';
+      return `data:${mime};base64,${part.inlineData.data}`;
+    }
+  }
+  return null;
+}
+
 export async function generateFace(ai, model, face, referenceParts, roomDescription = '') {
   const prompt = buildFacePrompt(face, roomDescription);
 

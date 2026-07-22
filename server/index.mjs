@@ -50,7 +50,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 20 * 1024 * 1024, // matches the client-side 20MB cap
-    files: FACE_KEYS.length,
+    files: FACE_KEYS.length * 2, // assigned faces + unassigned reference photos
     fields: 6,
   },
   fileFilter: (_req, file, cb) => {
@@ -112,12 +112,16 @@ app.post('/api/analyze', upload.array('photos', FACE_KEYS.length), async (req, r
  */
 app.post(
   '/api/generate-face',
-  upload.fields(FACE_KEYS.map((name) => ({ name, maxCount: 1 }))),
+  upload.fields([
+    ...FACE_KEYS.map((name) => ({ name, maxCount: 1 })),
+    { name: 'references', maxCount: FACE_KEYS.length },
+  ]),
   async (req, res) => {
     try {
       const files = req.files ?? {};
       const provided = FACE_KEYS.filter((k) => files[k]?.[0]);
-      if (provided.length === 0) {
+      const extraRefs = files.references ?? [];
+      if (provided.length === 0 && extraRefs.length === 0) {
         return res.status(400).json({ success: false, error: 'Provide at least one reference photo.' });
       }
 
@@ -125,12 +129,18 @@ app.post(
       if (!FACE_KEYS.includes(face) || provided.includes(face)) {
         return res.status(400).json({ success: false, error: 'Invalid face requested.' });
       }
-      const roomDescription = String(req.body?.roomDescription ?? '').slice(0, 4000);
+      const roomDescription = String(req.body?.roomDescription ?? '').slice(0, 6000);
 
-      const referenceParts = provided.flatMap((key) => [
-        { text: `Reference photo — the ${FACE_LABELS[key]} of the room:` },
-        toInlinePart(files[key][0]),
-      ]);
+      const referenceParts = [
+        ...provided.flatMap((key) => [
+          { text: `Reference photo — the ${FACE_LABELS[key]} of the room:` },
+          toInlinePart(files[key][0]),
+        ]),
+        ...extraRefs.flatMap((file) => [
+          { text: `Additional reference photo of the same room (overview or close-up detail):` },
+          toInlinePart(file),
+        ]),
+      ];
 
       let image = null;
       let provider = 'gemini';
@@ -147,18 +157,27 @@ app.post(
         if (geminiError) {
           console.warn(`Gemini generation failed (${geminiError.status ?? 'no image'}), falling back to OpenAI`);
         }
-        const references = provided.map((key) => ({
-          face: key,
-          mimeType: files[key][0].mimetype,
-          base64: files[key][0].buffer.toString('base64'),
-        }));
+        const references = [
+          ...provided.map((key) => ({
+            face: key,
+            mimeType: files[key][0].mimetype,
+            base64: files[key][0].buffer.toString('base64'),
+          })),
+          ...extraRefs.map((file, i) => ({
+            face: `reference${i}`,
+            mimeType: file.mimetype,
+            base64: file.buffer.toString('base64'),
+          })),
+        ];
+        // Long walls render in landscape; ceiling/floor stay square.
+        const size = face === 'top' || face === 'bottom' ? '1024x1024' : '1536x1024';
         image = await generateFaceOpenAI(
           OPENAI_API_KEY,
           OPENAI_IMAGE_MODEL,
           face,
           references,
           roomDescription,
-          { quality: OPENAI_IMAGE_QUALITY },
+          { quality: OPENAI_IMAGE_QUALITY, size },
         );
         provider = 'openai';
       } else if (!image && geminiError) {

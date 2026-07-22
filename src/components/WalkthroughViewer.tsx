@@ -2,11 +2,16 @@ import { useEffect, useMemo, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
-import { RoomFaces } from '../types';
+import { RoomFaces, RoomDimensions } from '../types';
 
 interface WalkthroughViewerProps {
   faces: RoomFaces;
+  /** Relative room proportions from the analysis step; defaults to a cube. */
+  dimensions?: RoomDimensions;
 }
+
+const clampDim = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.min(3, Math.max(0.5, v)) : 1;
 
 function makeTexture(loader: THREE.TextureLoader, dataUrl: string | null, color: string): THREE.Texture {
   let texture: THREE.Texture;
@@ -28,18 +33,24 @@ function makeTexture(loader: THREE.TextureLoader, dataUrl: string | null, color:
   return texture;
 }
 
-export function WalkthroughViewer({ faces }: WalkthroughViewerProps) {
+export function WalkthroughViewer({ faces, dimensions }: WalkthroughViewerProps) {
   const [textures, setTextures] = useState<THREE.Texture[] | null>(null);
 
   // Mirror on X at the GEOMETRY level so the box renders from inside with
   // unmirrored textures. (An object-level scale of -1 doesn't work: the
   // renderer detects the negative determinant and flips winding compensation,
   // which culls every face when the camera is inside the box.)
+  // The box is proportioned from the analyzed room dimensions — an elongated
+  // room renders as an elongated box, not a cube.
   const geometry = useMemo(() => {
-    const g = new THREE.BoxGeometry(10, 10, 10);
+    const w = clampDim(dimensions?.width);
+    const d = clampDim(dimensions?.depth);
+    const h = clampDim(dimensions?.height);
+    const scale = 10 / Math.max(w, d, h);
+    const g = new THREE.BoxGeometry(w * scale, h * scale, d * scale);
     g.scale(-1, 1, 1);
     return g;
-  }, []);
+  }, [dimensions]);
   useEffect(() => () => geometry.dispose(), [geometry]);
 
   useEffect(() => {

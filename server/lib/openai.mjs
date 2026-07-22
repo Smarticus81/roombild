@@ -1,4 +1,4 @@
-import { FACE_KEYS, FACE_LABELS, ANALYZE_PROMPT } from './gemini.mjs';
+import { FACE_KEYS, FACE_LABELS, ANALYZE_PROMPT, buildFacePrompt } from './gemini.mjs';
 
 export const DEFAULT_OPENAI_MODEL = 'gpt-5.1';
 export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-1.5';
@@ -8,22 +8,33 @@ const RESPONSE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    assignments: {
+    photos: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
         properties: {
           photoIndex: { type: 'integer' },
-          face: { type: 'string', enum: [...FACE_KEYS, 'unknown'] },
+          role: { type: 'string', enum: ['wall', 'overview', 'closeup', 'unknown'] },
+          face: { type: 'string', enum: [...FACE_KEYS, 'none'] },
         },
-        required: ['photoIndex', 'face'],
+        required: ['photoIndex', 'role', 'face'],
       },
+    },
+    dimensions: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        width: { type: 'number' },
+        depth: { type: 'number' },
+        height: { type: 'number' },
+      },
+      required: ['width', 'depth', 'height'],
     },
     roomDescription: { type: 'string' },
     reasoning: { type: 'string' },
   },
-  required: ['assignments', 'roomDescription', 'reasoning'],
+  required: ['photos', 'dimensions', 'roomDescription', 'reasoning'],
 };
 
 /**
@@ -83,22 +94,17 @@ export async function analyzeRoomOpenAI(apiKey, model, photos, { effort = 'low' 
  * or null if the model produced nothing. If the configured model is not
  * available on this account, retries once with the older gpt-image-1.
  */
-export async function generateFaceOpenAI(apiKey, model, face, references, roomDescription = '', { quality = 'medium' } = {}) {
-  const labels = references.map((r) => FACE_LABELS[r.face] ?? r.face);
+export async function generateFaceOpenAI(apiKey, model, face, references, roomDescription = '', { quality = 'medium', size = '1024x1024' } = {}) {
+  const labels = references.map((r) => FACE_LABELS[r.face] ?? 'additional reference view');
   const prompt =
-    `The attached reference photos show surfaces of the same real room, in this order: ${labels.join(', ')}. ` +
-    (roomDescription ? `Analysis of the room: ${roomDescription}\n\n` : '') +
-    `Generate a single photorealistic image of this room's ${FACE_LABELS[face]}, viewed straight-on ` +
-    `and filling the entire frame, as if standing in the middle of the room facing it. ` +
-    `Match the lighting, color palette, materials, architectural style and furnishings of the reference photos exactly ` +
-    `so the new image blends seamlessly with them as one face of a cube-mapped room. ` +
-    `Do not include any text, borders, people or watermarks.`;
+    `The attached reference photos show the same real room, in this order: ${labels.join(', ')}. ` +
+    buildFacePrompt(face, roomDescription);
 
   const attempt = async (m) => {
     const form = new FormData();
     form.append('model', m);
     form.append('prompt', prompt.slice(0, 30000));
-    form.append('size', '1024x1024');
+    form.append('size', size);
     form.append('quality', quality);
     form.append('input_fidelity', 'high');
     for (const ref of references) {

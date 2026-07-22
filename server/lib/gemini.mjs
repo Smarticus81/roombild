@@ -20,17 +20,52 @@ export function createClient(apiKey) {
 
 /** Shared instructions for the photo-analysis (image reasoning) step. */
 export const ANALYZE_PROMPT =
-  `You are a spatial-reasoning assistant reconstructing a real room as a cube map for a 3D walkthrough. ` +
-  `The cube has six faces: front, back, left and right walls, top (ceiling) and bottom (floor). ` +
-  `Study the numbered photos above — they were all taken inside the same room.\n\n` +
-  `1. For each photo, decide which single cube face it best represents (the surface that dominates the frame). ` +
-  `Use "unknown" if a photo is not a usable straight-on view of one surface. ` +
-  `Assign each face to at most one photo — pick the best candidate if several qualify. ` +
-  `Pay attention to shared furniture, windows, doors and lighting to work out how the views relate spatially.\n` +
-  `2. Write "roomDescription": a dense, concrete description of the room to brief an image generator — ` +
-  `architectural style, wall/floor/ceiling colors and materials, lighting direction and warmth, furniture and where it sits relative to the assigned walls, ` +
-  `and what should logically appear on each MISSING face so the reconstructed room stays consistent (e.g. the source of visible light, continuation of flooring).\n` +
-  `3. Write "reasoning": 2-4 friendly sentences for the end user summarizing what you recognized and how you decided the layout.`;
+  `You are a spatial-reasoning assistant reconstructing a real room as a proportioned rectangular box ` +
+  `(a cube map with distinct wall lengths) for a 3D walkthrough. The six faces are: front, back, left and right walls, ` +
+  `top (ceiling) and bottom (floor). Study the numbered photos above — all taken inside the same room.\n\n` +
+  `1. "photos": classify every photo's role:\n` +
+  `   - "wall": a straight-on view DOMINATED by exactly one surface, usable as the full texture for that face. Set "face" to that face.\n` +
+  `   - "overview": a wide, corner, or down-the-length view showing MULTIPLE surfaces (great for understanding the layout, unusable as a single face). Set "face" to "none".\n` +
+  `   - "closeup": a narrow detail crop of part of a surface (furniture, a corner, appliances). Set "face" to "none".\n` +
+  `   - "unknown": unusable. Set "face" to "none".\n` +
+  `   Be strict: when in doubt between "wall" and "overview"/"closeup", do NOT choose "wall". ` +
+  `Never assign two photos to the same face. Only a straight-DOWN floor-dominated shot may be "bottom"; only a straight-UP ceiling-dominated shot may be "top". ` +
+  `Photos not assigned to a face are still used as reference imagery for generation, so nothing is wasted.\n` +
+  `2. "dimensions": the room's relative proportions, each a number from 1 to 3 — "width" (length of the front/back walls), ` +
+  `"depth" (length of the left/right walls), "height". Example: a long narrow studio seen down its length might be width 1, depth 2.5, height 1.2. ` +
+  `Use overview photos and shared landmarks to judge this.\n` +
+  `3. "roomDescription": a dense, concrete brief for an image generator covering ALL SIX faces of the box: ` +
+  `architectural style, wall/floor/ceiling colors and materials, lighting direction and warmth, which walls are long vs short, ` +
+  `and for each face exactly what belongs on it (furniture, doors, windows, art). State each object's single true location ONCE ` +
+  `so it is never duplicated onto other faces. Note what should logically appear on faces no photo shows (light sources, continuation of flooring).\n` +
+  `4. "reasoning": 2-4 friendly sentences for the end user summarizing what you recognized and how you decided the layout.`;
+
+/** Response schema shared by both analysis providers (Gemini + OpenAI). */
+export const ANALYSIS_SCHEMA_PROPERTIES = {
+  photos: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        photoIndex: { type: 'integer' },
+        role: { type: 'string', enum: ['wall', 'overview', 'closeup', 'unknown'] },
+        face: { type: 'string', enum: [...FACE_KEYS, 'none'] },
+      },
+      required: ['photoIndex', 'role', 'face'],
+    },
+  },
+  dimensions: {
+    type: 'object',
+    properties: {
+      width: { type: 'number' },
+      depth: { type: 'number' },
+      height: { type: 'number' },
+    },
+    required: ['width', 'depth', 'height'],
+  },
+  roomDescription: { type: 'string' },
+  reasoning: { type: 'string' },
+};
 
 /**
  * Reasoning step: looks at the uploaded photos, decides which cube face each
@@ -48,22 +83,8 @@ export async function analyzeRoom(ai, model, photoParts) {
       responseMimeType: 'application/json',
       responseSchema: {
         type: 'object',
-        properties: {
-          assignments: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                photoIndex: { type: 'integer' },
-                face: { type: 'string', enum: [...FACE_KEYS, 'unknown'] },
-              },
-              required: ['photoIndex', 'face'],
-            },
-          },
-          roomDescription: { type: 'string' },
-          reasoning: { type: 'string' },
-        },
-        required: ['assignments', 'roomDescription', 'reasoning'],
+        properties: ANALYSIS_SCHEMA_PROPERTIES,
+        required: ['photos', 'dimensions', 'roomDescription', 'reasoning'],
       },
     },
   });
@@ -84,15 +105,22 @@ export async function analyzeRoom(ai, model, photoParts) {
  * returned no image. `referenceParts` are the labeled inlineData photo parts
  * (originals plus any faces generated earlier, for coherence).
  */
-export async function generateFace(ai, model, face, referenceParts, roomDescription = '') {
-  const prompt =
-    `These reference photos all show the same real room, viewed straight-on at different surfaces. ` +
+export function buildFacePrompt(face, roomDescription = '') {
+  return (
+    `These reference photos all show the same real room (some straight-on wall views, some overviews or close-up details). ` +
     (roomDescription ? `Analysis of the room: ${roomDescription}\n\n` : '') +
-    `Generate a single photorealistic image of this room's ${FACE_LABELS[face]}, viewed straight-on ` +
-    `and filling the entire frame, as if standing in the middle of the room facing it. ` +
+    `The room is a rectangular box. Generate a single photorealistic image of ONLY this room's ${FACE_LABELS[face]}, ` +
+    `viewed straight-on and filling the entire frame, as if standing in the middle of the room facing it. ` +
     `Match the lighting, color palette, materials, architectural style and furnishings of the reference photos exactly ` +
-    `so the new image blends seamlessly with them as one face of a cube-mapped room. ` +
-    `Do not include any text, borders, people or watermarks. Output only the image.`;
+    `so the new image blends seamlessly with the other faces. ` +
+    `IMPORTANT: include only what belongs on the ${FACE_LABELS[face]} according to the analysis — ` +
+    `do NOT duplicate furniture or objects that belong on other surfaces onto this one. ` +
+    `Do not include any text, borders, people or watermarks. Output only the image.`
+  );
+}
+
+export async function generateFace(ai, model, face, referenceParts, roomDescription = '') {
+  const prompt = buildFacePrompt(face, roomDescription);
 
   const response = await ai.models.generateContent({
     model,

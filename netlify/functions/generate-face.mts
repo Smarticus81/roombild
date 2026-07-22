@@ -51,7 +51,13 @@ export default async (req: Request) => {
   }
 
   const provided = FACE_KEYS.filter((k: string) => files[k]);
-  if (provided.length === 0) {
+  const extraFiles = form.getAll('references').filter((v): v is File => v instanceof File).slice(0, FACE_KEYS.length);
+  for (const file of extraFiles) {
+    if (file.size > MAX_FILE_BYTES || !/^image\/(jpeg|png|webp)$/.test(file.type)) {
+      return json(400, { success: false, error: 'Reference photos must be JPEG/PNG/WebP under 20MB.' });
+    }
+  }
+  if (provided.length === 0 && extraFiles.length === 0) {
     return json(400, { success: false, error: 'Provide at least one reference photo.' });
   }
 
@@ -59,21 +65,34 @@ export default async (req: Request) => {
   if (!FACE_KEYS.includes(face) || provided.includes(face)) {
     return json(400, { success: false, error: 'Invalid face requested.' });
   }
-  const roomDescription = String(form.get('roomDescription') ?? '').slice(0, 4000);
+  const roomDescription = String(form.get('roomDescription') ?? '').slice(0, 6000);
 
   try {
-    const references = await Promise.all(
-      provided.map(async (key: string) => {
-        const file = files[key] as File;
-        return {
-          face: key,
+    const references = [
+      ...(await Promise.all(
+        provided.map(async (key: string) => {
+          const file = files[key] as File;
+          return {
+            face: key,
+            mimeType: file.type,
+            base64: Buffer.from(await file.arrayBuffer()).toString('base64'),
+          };
+        }),
+      )),
+      ...(await Promise.all(
+        extraFiles.map(async (file, i) => ({
+          face: `reference${i}`,
           mimeType: file.type,
           base64: Buffer.from(await file.arrayBuffer()).toString('base64'),
-        };
-      }),
-    );
+        })),
+      )),
+    ];
     const referenceParts = references.flatMap((ref) => [
-      { text: `Reference photo — the ${FACE_LABELS[ref.face as keyof typeof FACE_LABELS]} of the room:` },
+      {
+        text: FACE_LABELS[ref.face as keyof typeof FACE_LABELS]
+          ? `Reference photo — the ${FACE_LABELS[ref.face as keyof typeof FACE_LABELS]} of the room:`
+          : `Additional reference photo of the same room (overview or close-up detail):`,
+      },
       { inlineData: { mimeType: ref.mimeType, data: ref.base64 } },
     ]);
 
@@ -100,7 +119,11 @@ export default async (req: Request) => {
         face,
         references,
         roomDescription,
-        { quality: Netlify.env.get('OPENAI_IMAGE_QUALITY') || 'medium' },
+        {
+          quality: Netlify.env.get('OPENAI_IMAGE_QUALITY') || 'medium',
+          // Long walls render in landscape; ceiling/floor stay square.
+          size: face === 'top' || face === 'bottom' ? '1024x1024' : '1536x1024',
+        },
       );
       provider = 'openai';
     } else if (!image && geminiError) {

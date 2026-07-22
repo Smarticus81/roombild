@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { PhotoUploader } from './components/PhotoUploader';
 import { ReasoningProgress } from './components/ReasoningProgress';
 import { WalkthroughViewer } from './components/WalkthroughViewer';
-import { RoomFaces, FaceKey, UploadedPhoto, AnalysisResult, Phase, BuildProgress } from './types';
+import { RoomFaces, FaceKey, UploadedPhoto, AnalysisResult, Phase, BuildProgress, RoomDimensions } from './types';
 import { Cuboid, RotateCcw, X } from 'lucide-react';
 
 const FACE_KEYS: FaceKey[] = ['front', 'back', 'left', 'right', 'top', 'bottom'];
@@ -41,6 +41,7 @@ export default function App() {
   const [faces, setFaces] = useState<RoomFaces>(EMPTY_FACES);
   const [progress, setProgress] = useState<BuildProgress | null>(null);
   const [reasoning, setReasoning] = useState<string | null>(null);
+  const [dimensions, setDimensions] = useState<RoomDimensions | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Guards against state updates from a build that was reset mid-flight.
   const buildToken = useRef(0);
@@ -51,6 +52,7 @@ export default function App() {
     setFaces(EMPTY_FACES);
     setProgress(null);
     setReasoning(null);
+    setDimensions(null);
     setError(null);
   };
 
@@ -75,23 +77,39 @@ export default function App() {
       const analysis = await postForm<AnalysisResult>('/api/analyze', analyzeForm);
       if (!live()) return;
       setReasoning(analysis.reasoning || null);
+      setDimensions(analysis.dimensions ?? null);
 
+      // Only straight-on single-surface "wall" photos may become a face
+      // texture. Overviews and close-ups are reference imagery — they inform
+      // generation but never land on a face (that's what put kitchens on
+      // floors and vents on ceilings).
       const assigned: RoomFaces = { ...EMPTY_FACES };
-      for (const a of analysis.assignments ?? []) {
-        const photo = photos[a.photoIndex];
-        if (photo && a.face !== 'unknown' && FACE_KEYS.includes(a.face) && !assigned[a.face]) {
-          assigned[a.face] = photo.dataUrl;
+      const assignedIndices = new Set<number>();
+      for (const p of analysis.photos ?? []) {
+        const photo = photos[p.photoIndex];
+        if (
+          photo &&
+          p.role === 'wall' &&
+          p.face !== 'none' &&
+          FACE_KEYS.includes(p.face) &&
+          !assigned[p.face]
+        ) {
+          assigned[p.face] = photo.dataUrl;
+          assignedIndices.add(p.photoIndex);
         }
-      }
-      if (FACE_KEYS.every((k) => !assigned[k])) {
-        throw new Error(
-          'The AI could not match any photo to a room surface. Try clearer, straight-on photos of the walls, floor or ceiling.',
-        );
       }
       setFaces(assigned);
 
-      // Step 2b — generate each missing face, feeding previously generated
-      // faces back in as references so the room stays coherent.
+      const referencePhotos = photos.filter((_, i) => !assignedIndices.has(i));
+      const description =
+        (analysis.roomDescription ?? '') +
+        (analysis.dimensions
+          ? ` Room proportions — width ${analysis.dimensions.width}, depth ${analysis.dimensions.depth}, height ${analysis.dimensions.height}.`
+          : '');
+
+      // Step 2b — generate every face we don't have a clean wall photo for,
+      // feeding assigned photos, unassigned reference photos AND previously
+      // generated faces back in so the room stays coherent.
       const missing = FACE_KEYS.filter((k) => !assigned[k]);
       const current: RoomFaces = { ...assigned };
       const failures: string[] = [];
@@ -108,8 +126,11 @@ export default function App() {
               genForm.append(key, await dataURLtoBlob(dataUrl), `${key}.jpg`);
             }
           }
+          for (const [j, ref] of referencePhotos.entries()) {
+            genForm.append('references', await dataURLtoBlob(ref.dataUrl), `reference${j}.jpg`);
+          }
           genForm.append('face', face);
-          genForm.append('roomDescription', analysis.roomDescription ?? '');
+          genForm.append('roomDescription', description);
           const result = await postForm<{ face: FaceKey; image: string }>('/api/generate-face', genForm);
           if (!live()) return;
           current[face] = result.image;
@@ -178,7 +199,7 @@ export default function App() {
         {phase === 'view' && (
           <div className="w-full max-w-6xl mx-auto flex-1 min-h-0 self-center flex flex-col gap-3">
             <div className="flex-1 min-h-0 relative">
-              <WalkthroughViewer faces={faces} />
+              <WalkthroughViewer faces={faces} dimensions={dimensions ?? undefined} />
             </div>
             {reasoning && (
               <p className="text-gray-500 text-xs font-mono shrink-0 max-w-3xl mx-auto text-center">

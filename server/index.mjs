@@ -13,6 +13,8 @@ import {
   analyzeRoom,
   generateFace,
   generatePanorama,
+  reviewSeam,
+  fixSeam,
   describeApiError,
 } from './lib/gemini.mjs';
 import {
@@ -21,6 +23,8 @@ import {
   analyzeRoomOpenAI,
   generateFaceOpenAI,
   generatePanoramaOpenAI,
+  reviewSeamOpenAI,
+  fixSeamOpenAI,
 } from './lib/openai.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -158,6 +162,90 @@ app.post('/api/generate-pano', upload.array('photos', FACE_KEYS.length * 2), asy
     res.json({ success: true, image, provider });
   } catch (err) {
     console.error('generate-pano error:', err);
+    const { status, message } = describeApiError(err);
+    res.status(status).json({ success: false, error: message });
+  }
+});
+
+/**
+ * Seam review — the client rolls the panorama so the wrap junction is at the
+ * image center and posts it as `image`. Returns
+ * `{ success, seamless, problems, provider }`.
+ */
+app.post('/api/review-seam', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'Provide the rolled panorama as "image".' });
+    }
+    const image = { mimeType: req.file.mimetype, base64: req.file.buffer.toString('base64') };
+
+    let verdict = null;
+    let provider = 'gemini';
+    if (OPENAI_API_KEY) {
+      try {
+        verdict = await reviewSeamOpenAI(OPENAI_API_KEY, OPENAI_MODEL, image, {
+          effort: OPENAI_REASONING_EFFORT,
+        });
+        provider = 'openai';
+      } catch (err) {
+        console.error('OpenAI seam review failed, falling back to Gemini:', err);
+      }
+    }
+    if (!verdict) {
+      verdict = await reviewSeam(ai, TEXT_MODEL, toInlinePart(req.file));
+    }
+    res.json({ success: true, provider, seamless: Boolean(verdict.seamless), problems: String(verdict.problems ?? '') });
+  } catch (err) {
+    console.error('review-seam error:', err);
+    const { status, message } = describeApiError(err);
+    res.status(status).json({ success: false, error: message });
+  }
+});
+
+/**
+ * Seam repair — takes the center-rolled panorama plus the reviewer's notes
+ * and repairs the visible center discontinuity. Returns `{ success, image, provider }`.
+ */
+app.post('/api/fix-seam', upload.single('image'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'Provide the rolled panorama as "image".' });
+    }
+    const problems = String(req.body?.problems ?? '').slice(0, 2000);
+    const roomDescription = String(req.body?.roomDescription ?? '').slice(0, 6000);
+
+    let image = null;
+    let provider = 'gemini';
+    let geminiError = null;
+    try {
+      image = await fixSeam(ai, IMAGE_MODEL, toInlinePart(req.file), problems, roomDescription);
+    } catch (err) {
+      geminiError = err;
+    }
+
+    if (!image && OPENAI_API_KEY) {
+      if (geminiError) {
+        console.warn(`Gemini seam fix failed (${geminiError.status ?? 'no image'}), falling back to OpenAI`);
+      }
+      image = await fixSeamOpenAI(
+        OPENAI_API_KEY,
+        OPENAI_IMAGE_MODEL,
+        { mimeType: req.file.mimetype, base64: req.file.buffer.toString('base64') },
+        problems,
+        roomDescription,
+        { quality: OPENAI_IMAGE_QUALITY },
+      );
+      provider = 'openai';
+    } else if (!image && geminiError) {
+      throw geminiError;
+    }
+
+    if (!image) {
+      return res.status(502).json({ success: false, error: 'The image model did not return a repaired panorama.' });
+    }
+    res.json({ success: true, image, provider });
+  } catch (err) {
+    console.error('fix-seam error:', err);
     const { status, message } = describeApiError(err);
     res.status(status).json({ success: false, error: message });
   }

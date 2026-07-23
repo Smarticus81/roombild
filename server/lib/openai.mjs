@@ -1,4 +1,12 @@
-import { FACE_KEYS, FACE_LABELS, ANALYZE_PROMPT, buildFacePrompt, buildPanoPrompt } from './gemini.mjs';
+import {
+  FACE_KEYS,
+  FACE_LABELS,
+  ANALYZE_PROMPT,
+  SEAM_REVIEW_PROMPT,
+  buildFacePrompt,
+  buildPanoPrompt,
+  buildSeamFixPrompt,
+} from './gemini.mjs';
 
 export const DEFAULT_OPENAI_MODEL = 'gpt-5.6';
 export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-2';
@@ -121,6 +129,80 @@ async function imagesEditRequest(apiKey, model, prompt, photos, { quality, size 
 const isModelProblem = (err) =>
   (err?.status === 400 || err?.status === 404) && /model/i.test(err?.body ?? '');
 const isSizeProblem = (err) => err?.status === 400 && /size/i.test(err?.body ?? '');
+
+const SEAM_RESPONSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    seamless: { type: 'boolean' },
+    problems: { type: 'string' },
+  },
+  required: ['seamless', 'problems'],
+};
+
+/**
+ * Seam review via OpenAI's Responses API. `image` is { mimeType, base64 } of
+ * the center-rolled panorama. Returns { seamless, problems }.
+ */
+export async function reviewSeamOpenAI(apiKey, model, image, { effort = 'low' } = {}) {
+  const res = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      reasoning: { effort },
+      input: [
+        {
+          role: 'user',
+          content: [
+            { type: 'input_image', image_url: `data:${image.mimeType};base64,${image.base64}` },
+            { type: 'input_text', text: SEAM_REVIEW_PROMPT },
+          ],
+        },
+      ],
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'seam_review',
+          strict: true,
+          schema: SEAM_RESPONSE_SCHEMA,
+        },
+      },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    const err = new Error(`OpenAI API error ${res.status}: ${body.slice(0, 300)}`);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  const message = (data.output ?? []).find((item) => item.type === 'message');
+  const text = (message?.content ?? []).find((c) => c.type === 'output_text')?.text ?? '';
+  if (!text) throw new Error('OpenAI returned no text output for the seam review.');
+  return JSON.parse(text);
+}
+
+/**
+ * Seam repair via OpenAI's Images Edits API. `image` is the center-rolled
+ * panorama; the fix targets the visible center discontinuity. Returns a data
+ * URL or null. Downgrades the model once if unavailable.
+ */
+export async function fixSeamOpenAI(apiKey, model, image, problems = '', roomDescription = '', { quality = 'medium', size = '1536x1024' } = {}) {
+  const prompt = buildSeamFixPrompt(problems, roomDescription);
+  try {
+    return await imagesEditRequest(apiKey, model, prompt, [image], { quality, size });
+  } catch (err) {
+    if (model !== FALLBACK_OPENAI_IMAGE_MODEL && isModelProblem(err)) {
+      console.warn(`OpenAI model "${model}" unavailable, retrying with ${FALLBACK_OPENAI_IMAGE_MODEL}`);
+      return imagesEditRequest(apiKey, FALLBACK_OPENAI_IMAGE_MODEL, prompt, [image], { quality, size });
+    }
+    throw err;
+  }
+}
 
 /**
  * Single seamless 360° equirectangular panorama via OpenAI's Images Edits

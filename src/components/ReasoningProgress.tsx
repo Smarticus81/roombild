@@ -10,10 +10,22 @@ interface ReasoningProgressProps {
 
 export function ReasoningProgress({ progress, photos, reasoning }: ReasoningProgressProps) {
   const analyzing = progress.stage === 'analyzing';
-  const headline = analyzing ? 'Analyzing your photos…' : 'Painting your 360° room…';
-  const subline = analyzing
-    ? 'The AI is studying your photos to understand the room’s layout, materials and lighting.'
-    : 'One seamless 360° panorama is being generated from your photos — this takes about a minute.';
+  const headline =
+    progress.stage === 'analyzing'
+      ? 'Analyzing your photos…'
+      : progress.stage === 'generating'
+        ? 'Painting your 360° room…'
+        : progress.stage === 'reviewing'
+          ? 'Reviewing the wrap-around…'
+          : 'Reconciling the seam…';
+  const subline =
+    progress.stage === 'analyzing'
+      ? 'The AI is studying your photos to understand the room’s layout, materials and lighting.'
+      : progress.stage === 'generating'
+        ? 'One seamless 360° panorama is being generated from your photos — this takes about a minute.'
+        : progress.stage === 'reviewing'
+          ? 'The AI is checking that the room stays continuous where the 360° view reconnects.'
+          : 'A discontinuity was found where the panorama wraps — the AI is repairing it and will re-check.';
 
   return (
     <div className="w-full max-w-2xl flex flex-col items-center space-y-8">

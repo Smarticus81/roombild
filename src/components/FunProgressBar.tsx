@@ -29,16 +29,34 @@ const GENERATE_GENERIC = [
   'Double-checking the vibes…',
 ];
 
-/** Milestone math: analysis owns 0–22%, generation splits the remaining 78%. */
+const REVIEW_MESSAGES = [
+  'Walking the full 360° looking for seams…',
+  'Checking where the room reconnects…',
+  'Squinting at the wrap-around joint…',
+  'Making sure the walls agree with each other…',
+];
+
+const FIX_MESSAGES = [
+  'Re-plastering where the ends meet…',
+  'Nudging the walls into alignment…',
+  'Smoothing the wrap-around joint…',
+  'Convincing both edges they’re the same wall…',
+];
+
+/** Milestone math: analysis 0–22%, generation 22–72%, seam loop 72–98%. */
 function bounds(progress: BuildProgress): { floor: number; cap: number } {
-  if (progress.stage === 'analyzing' || progress.total === 0) {
+  if (progress.stage === 'analyzing' || (progress.stage === 'generating' && progress.total === 0)) {
     return { floor: 0, cap: 22 };
   }
-  const per = 78 / progress.total;
-  return {
-    floor: 22 + per * (progress.current - 1),
-    cap: Math.min(98, 22 + per * progress.current - 1),
-  };
+  if (progress.stage === 'generating') {
+    const per = 50 / progress.total;
+    return {
+      floor: 22 + per * (progress.current - 1),
+      cap: Math.min(98, 22 + per * progress.current - 1),
+    };
+  }
+  // reviewing / fixing: creep through the last band regardless of attempt.
+  return { floor: 72, cap: 97 };
 }
 
 interface FunProgressBarProps {
@@ -56,6 +74,7 @@ export function FunProgressBar({ progress }: FunProgressBarProps) {
       setPct((p) => {
         const { floor, cap } = bounds(progress);
         if (p < floor) return Math.min(floor, p + (floor - p) * 0.35 + 0.6);
+        if (p >= cap) return p; // never move backwards (e.g. review → fix → review)
         return Math.min(cap, p + Math.max(0.06, (cap - p) * 0.025));
       });
     }, 90);
@@ -70,7 +89,11 @@ export function FunProgressBar({ progress }: FunProgressBarProps) {
   const pool =
     progress.stage === 'analyzing'
       ? ANALYZE_MESSAGES
-      : [...(progress.face ? FACE_FLAVOR[progress.face] : []), ...GENERATE_GENERIC];
+      : progress.stage === 'reviewing'
+        ? REVIEW_MESSAGES
+        : progress.stage === 'fixing'
+          ? FIX_MESSAGES
+          : [...(progress.face ? FACE_FLAVOR[progress.face] : []), ...GENERATE_GENERIC];
   const message = pool[msgIndex % pool.length];
 
   return (

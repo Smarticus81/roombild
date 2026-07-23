@@ -153,6 +153,81 @@ export async function generatePanorama(ai, model, referenceParts, roomDescriptio
   return null;
 }
 
+/**
+ * Prompt for judging the wrap seam. The client rotates the panorama so the
+ * wrap junction runs down the exact vertical center of the image.
+ */
+export const SEAM_REVIEW_PROMPT =
+  `This image is a 360° equirectangular room panorama that has been rotated so that its WRAP JUNCTION ` +
+  `(where the panorama's right edge meets its left edge) runs down the exact vertical CENTER of the image. ` +
+  `Judge whether the room reads as one continuous space across that center line: ` +
+  `walls must continue at consistent height and color, floor and baseboard lines must align, ` +
+  `furniture must not be cut off or abruptly change, lighting and perspective must flow naturally. ` +
+  `Minor texture noise is acceptable. Mismatched walls, misaligned floor lines, duplicated or truncated ` +
+  `furniture, or an obvious vertical "cut" are failures. ` +
+  `Respond with "seamless" (boolean) and "problems" (short concrete description of what breaks at the center line, or empty string if seamless).`;
+
+export const SEAM_SCHEMA_PROPERTIES = {
+  seamless: { type: 'boolean' },
+  problems: { type: 'string' },
+};
+
+/** Prompt for repairing a discontinuous wrap seam (image is center-rolled). */
+export function buildSeamFixPrompt(problems = '', roomDescription = '') {
+  return (
+    `This is a 360° equirectangular panorama of a room, rotated so that its wrap junction runs down the exact vertical center of the image. ` +
+    `The center line currently has a visible discontinuity. ` +
+    (problems ? `Observed problems: ${problems}\n\n` : '') +
+    (roomDescription ? `The room, for context: ${roomDescription}\n\n` : '') +
+    `Repair ONLY the area around the vertical center so the room reads as one continuous space: ` +
+    `align wall planes, colors and heights, make floor and baseboard lines meet exactly, complete any furniture that is cut off ` +
+    `(or remove the partial duplicate), and blend lighting smoothly. ` +
+    `Keep everything near the left and right edges of the image UNCHANGED, keep the same image dimensions, ` +
+    `and remember the outer left and right edges must still wrap seamlessly with each other. ` +
+    `Photorealistic. No text, borders, people or watermarks.`
+  );
+}
+
+/** Gemini seam review — returns { seamless, problems }. */
+export async function reviewSeam(ai, model, imagePart) {
+  const response = await ai.models.generateContent({
+    model,
+    contents: [{ role: 'user', parts: [imagePart, { text: SEAM_REVIEW_PROMPT }] }],
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'object',
+        properties: SEAM_SCHEMA_PROPERTIES,
+        required: ['seamless', 'problems'],
+      },
+    },
+  });
+  const text = response.text ?? '';
+  try {
+    return JSON.parse(text);
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error('The review model returned an unreadable response.');
+  }
+}
+
+/** Gemini seam repair — returns a data URL or null. */
+export async function fixSeam(ai, model, imagePart, problems = '', roomDescription = '') {
+  const response = await ai.models.generateContent({
+    model,
+    contents: [{ role: 'user', parts: [imagePart, { text: buildSeamFixPrompt(problems, roomDescription) }] }],
+  });
+  const parts = response?.candidates?.[0]?.content?.parts ?? [];
+  for (const part of parts) {
+    if (part.inlineData?.data) {
+      const mime = part.inlineData.mimeType || 'image/png';
+      return `data:${mime};base64,${part.inlineData.data}`;
+    }
+  }
+  return null;
+}
+
 export async function generateFace(ai, model, face, referenceParts, roomDescription = '') {
   const prompt = buildFacePrompt(face, roomDescription);
 

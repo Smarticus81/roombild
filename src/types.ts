@@ -41,8 +41,8 @@ export interface AnalysisResult {
 export type Phase = 'upload' | 'reasoning' | 'view';
 
 export interface BuildProgress {
-  stage: 'analyzing' | 'generating';
-  /** 1-based index of the face being generated (0 while analyzing). */
+  stage: 'analyzing' | 'generating' | 'reviewing' | 'fixing';
+  /** 1-based attempt/step counter for the current stage (0 while analyzing). */
   current: number;
   total: number;
   face: FaceKey | null;

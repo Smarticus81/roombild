@@ -10,6 +10,32 @@ async function dataURLtoBlob(dataUrl: string): Promise<Blob> {
   return res.blob();
 }
 
+/**
+ * Rolls an equirectangular panorama horizontally by half its width, moving
+ * the wrap junction (left/right edge) to the image center. Rolling twice
+ * returns the original arrangement, so the same helper both exposes the seam
+ * for review/repair and restores orientation afterwards.
+ */
+async function rollHalf(dataUrl: string): Promise<string> {
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('Could not load the panorama for seam processing.'));
+    img.src = dataUrl;
+  });
+  const canvas = document.createElement('canvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Could not process the panorama.');
+  const half = Math.floor(img.width / 2);
+  ctx.drawImage(img, half, 0, img.width - half, img.height, 0, 0, img.width - half, img.height);
+  ctx.drawImage(img, 0, 0, half, img.height, img.width - half, 0, half, img.height);
+  return canvas.toDataURL('image/jpeg', 0.92);
+}
+
+const MAX_SEAM_FIXES = 2;
+
 async function postForm<T>(url: string, form: FormData): Promise<T> {
   const res = await fetch(url, { method: 'POST', body: form });
   let data: (T & { success?: boolean; error?: string }) | null = null;
@@ -84,7 +110,43 @@ export default function App() {
       const result = await postForm<{ image: string }>('/api/generate-pano', genForm);
       if (!live()) return;
 
-      setPano(result.image);
+      // Step 2c — review-and-fix loop: roll the panorama so the wrap seam
+      // sits at the image center, have the reasoning model judge continuity,
+      // and let the image model repair the visible seam until it reconciles.
+      let currentPano = result.image;
+      for (let attempt = 1; attempt <= MAX_SEAM_FIXES + 1; attempt++) {
+        if (!live()) return;
+        setProgress({ stage: 'reviewing', current: attempt, total: MAX_SEAM_FIXES + 1, face: null });
+        try {
+          const rolled = await rollHalf(currentPano);
+          const reviewForm = new FormData();
+          reviewForm.append('image', await dataURLtoBlob(rolled), 'rolled.jpg');
+          const verdict = await postForm<{ seamless: boolean; problems: string }>(
+            '/api/review-seam',
+            reviewForm,
+          );
+          if (!live()) return;
+          if (verdict.seamless || attempt > MAX_SEAM_FIXES) break;
+
+          setProgress({ stage: 'fixing', current: attempt, total: MAX_SEAM_FIXES, face: null });
+          const fixForm = new FormData();
+          fixForm.append('image', await dataURLtoBlob(rolled), 'rolled.jpg');
+          fixForm.append('problems', verdict.problems ?? '');
+          fixForm.append('roomDescription', description);
+          const fixed = await postForm<{ image: string }>('/api/fix-seam', fixForm);
+          if (!live()) return;
+          // The repaired image is still center-rolled — roll back to restore
+          // the original orientation.
+          currentPano = await rollHalf(fixed.image);
+        } catch (err) {
+          // Seam polish is best-effort: keep the current panorama on failure.
+          console.warn('Seam review/fix skipped:', err);
+          break;
+        }
+      }
+
+      if (!live()) return;
+      setPano(currentPano);
       setPhase('view');
     } catch (err) {
       if (!live()) return;

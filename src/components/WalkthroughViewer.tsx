@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 
@@ -8,19 +8,28 @@ interface WalkthroughViewerProps {
   pano: string | null;
 }
 
+/** Applies max anisotropic filtering — critical for sharpness on a sphere,
+ *  where most of the texture is viewed at grazing angles. */
+function PanoTexture({ pano, onTexture }: { pano: string; onTexture: (t: THREE.Texture | null) => void }) {
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    const tex = new THREE.TextureLoader().load(pano, () => {
+      tex.anisotropy = gl.capabilities.getMaxAnisotropy();
+      tex.needsUpdate = true;
+    });
+    tex.colorSpace = THREE.SRGBColorSpace;
+    onTexture(tex);
+    return () => {
+      tex.dispose();
+      onTexture(null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pano, gl]);
+  return null;
+}
+
 export function WalkthroughViewer({ pano }: WalkthroughViewerProps) {
   const [texture, setTexture] = useState<THREE.Texture | null>(null);
-
-  useEffect(() => {
-    if (!pano) {
-      setTexture(null);
-      return;
-    }
-    const tex = new THREE.TextureLoader().load(pano);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    setTexture(tex);
-    return () => tex.dispose();
-  }, [pano]);
 
   // Mirror on X at the GEOMETRY level so the sphere renders from inside with
   // unmirrored imagery. (An object-level scale of -1 doesn't work: the
@@ -36,6 +45,7 @@ export function WalkthroughViewer({ pano }: WalkthroughViewerProps) {
   return (
     <div className="absolute inset-0 bg-black rounded-xl overflow-hidden shadow-2xl border border-gray-800">
       <Canvas camera={{ position: [0, 0, 0.1], fov: 75 }} gl={{ preserveDrawingBuffer: true }}>
+        {pano && <PanoTexture pano={pano} onTexture={setTexture} />}
         {texture && (
           <mesh geometry={geometry}>
             <meshBasicMaterial map={texture} side={THREE.FrontSide} toneMapped={false} />

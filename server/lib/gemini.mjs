@@ -38,7 +38,11 @@ export const ANALYZE_PROMPT =
   `architectural style, wall/floor/ceiling colors and materials, lighting direction and warmth, which walls are long vs short, ` +
   `and for each face exactly what belongs on it (furniture, doors, windows, art). State each object's single true location ONCE ` +
   `so it is never duplicated onto other faces. Note what should logically appear on faces no photo shows (light sources, continuation of flooring).\n` +
-  `4. "reasoning": 2-4 friendly sentences for the end user summarizing what you recognized and how you decided the layout.`;
+  `4. "spatialMap": a precise CLOCKWISE 360° inventory of the room as seen from its center, starting at the front wall. ` +
+  `Walk wall by wall in order and list every fixed feature and piece of furniture left-to-right with exact counts and positions ` +
+  `(e.g. "FRONT WALL (long): white door — piano with framed print above — second white door — DADA poster | RIGHT WALL (short): ..."). ` +
+  `Include doors, windows, art, shelving and large furniture. This inventory is the placement contract for the image generator, so be exhaustive and exact.\n` +
+  `5. "reasoning": 2-4 friendly sentences for the end user summarizing what you recognized and how you decided the layout.`;
 
 /** Response schema shared by both analysis providers (Gemini + OpenAI). */
 export const ANALYSIS_SCHEMA_PROPERTIES = {
@@ -64,6 +68,7 @@ export const ANALYSIS_SCHEMA_PROPERTIES = {
     required: ['width', 'depth', 'height'],
   },
   roomDescription: { type: 'string' },
+  spatialMap: { type: 'string' },
   reasoning: { type: 'string' },
 };
 
@@ -84,7 +89,7 @@ export async function analyzeRoom(ai, model, photoParts) {
       responseSchema: {
         type: 'object',
         properties: ANALYSIS_SCHEMA_PROPERTIES,
-        required: ['photos', 'dimensions', 'roomDescription', 'reasoning'],
+        required: ['photos', 'dimensions', 'roomDescription', 'spatialMap', 'reasoning'],
       },
     },
   });
@@ -127,9 +132,12 @@ export function buildPanoPrompt(roomDescription = '') {
     (roomDescription ? `Analysis of the room: ${roomDescription}\n\n` : '') +
     `Requirements: full 360° horizontal wrap — the left and right edges of the image must line up perfectly when wrapped around a sphere; ` +
     `the ceiling stretches across the top of the image and the floor across the bottom; ` +
-    `reproduce the room's ACTUAL layout, furniture, materials, colors and lighting exactly as shown in the reference photos; ` +
-    `every piece of furniture and every feature appears exactly once, in its true position; ` +
-    `walls flow continuously into each other with correct perspective. ` +
+    `reproduce the room's ACTUAL layout, furniture, materials, colors and lighting exactly as shown in the reference photos. ` +
+    `PLACEMENT IS A HARD CONSTRAINT: when a clockwise spatial inventory is given in the analysis, the panorama must present ` +
+    `those features in exactly that clockwise order and position — count the doors, windows and furniture and place each one ` +
+    `exactly where the inventory says, never relocating, omitting, inventing or duplicating any of them. ` +
+    `Walls flow continuously into each other with correct perspective. ` +
+    `Render at maximum detail and sharpness: crisp edges, legible textures, no blur, no soft focus. ` +
     `Photorealistic. No text, borders, people or watermarks.`
   );
 }

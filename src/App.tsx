@@ -31,7 +31,8 @@ async function rollHalf(dataUrl: string): Promise<string> {
   const half = Math.floor(img.width / 2);
   ctx.drawImage(img, half, 0, img.width - half, img.height, 0, 0, img.width - half, img.height);
   ctx.drawImage(img, 0, 0, half, img.height, img.width - half, 0, half, img.height);
-  return canvas.toDataURL('image/jpeg', 0.92);
+  // Lossless PNG — the roll/fix/unroll cycle must not degrade the panorama.
+  return canvas.toDataURL('image/png');
 }
 
 const MAX_SEAM_FIXES = 2;
@@ -95,6 +96,9 @@ export default function App() {
         (analysis.roomDescription ?? '') +
         (analysis.dimensions
           ? ` Room proportions — width ${analysis.dimensions.width}, depth ${analysis.dimensions.depth}, height ${analysis.dimensions.height}.`
+          : '') +
+        (analysis.spatialMap
+          ? `\n\nCLOCKWISE SPATIAL INVENTORY (must be followed exactly): ${analysis.spatialMap}`
           : '');
 
       // Step 2b — ONE seamless 360° equirectangular panorama generated from

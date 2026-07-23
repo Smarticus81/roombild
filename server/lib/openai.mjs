@@ -40,9 +40,10 @@ const RESPONSE_SCHEMA = {
       required: ['width', 'depth', 'height'],
     },
     roomDescription: { type: 'string' },
+    spatialMap: { type: 'string' },
     reasoning: { type: 'string' },
   },
-  required: ['photos', 'dimensions', 'roomDescription', 'reasoning'],
+  required: ['photos', 'dimensions', 'roomDescription', 'spatialMap', 'reasoning'],
 };
 
 /**

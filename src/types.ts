@@ -35,6 +35,8 @@ export interface AnalysisResult {
   photos: PhotoClassification[];
   dimensions: RoomDimensions;
   roomDescription: string;
+  /** Clockwise wall-by-wall inventory — the placement contract for generation. */
+  spatialMap: string;
   reasoning: string;
 }
 
